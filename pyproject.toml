@@ -1,0 +1,30 @@
+[project]
+name = "vibe-serch"
+version = "0.1.0"
+description = "Daily AI-verified digest scanner for vibe-coding and AI tools community"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic",
+    "apscheduler",
+    "fastapi",
+    "httpx",
+    "praw",
+    "pydantic",
+    "pydantic-settings",
+    "python-telegram-bot",
+    "sse-starlette",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

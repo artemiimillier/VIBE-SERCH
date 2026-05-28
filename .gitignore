@@ -1,0 +1,37 @@
+# Secrets and env files (NEVER commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# Local Claude/IDE state
+.claude/
+.qwen/
+.playwright-mcp/
+CLAUDE.local.md
+.DS_Store
+
+# Private business context (do not publish)
+business/
+
+# OS
+Thumbs.db

@@ -1,0 +1,22 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "RUF001",  # ambiguous unicode - expected for Russian/Cyrillic text
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
