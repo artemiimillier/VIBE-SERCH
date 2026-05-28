@@ -1,165 +1,160 @@
-"""FastAPI web interface - run pipeline and display results in browser."""
+"""FastAPI web app - serves the UI and exposes KV-backed status endpoints.
 
-import asyncio
-import atexit
-import json
+Designed for Vercel serverless: no in-memory state, no background scheduler.
+The pipeline runs only via Vercel Cron hitting GET /api/cron.
+"""
+
 import logging
+import os
 import time
-from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from sse_starlette.sse import EventSourceResponse
 
+from src import storage
 from src.config import get_settings
 from src.models import DailyDigest, MethodCard
-from src.scheduler import cron_status, get_next_run, start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="VIBE-SERCH")
 
-start_scheduler()
-atexit.register(stop_scheduler)
-
-
-def _read_html() -> str:
-    """Read the HTML template from disk."""
-    from pathlib import Path
-
-    html_path = Path(__file__).parent / "templates" / "index.html"
-    return html_path.read_text(encoding="utf-8")
+_TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     """Serve the main page."""
-    return _read_html()
-
-
-@app.get("/api/run")
-async def run_pipeline() -> EventSourceResponse:
-    """Run the full pipeline, streaming progress via SSE."""
-    return EventSourceResponse(
-        _pipeline_stream(),
-        media_type="text/event-stream",
-    )
+    return _TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
 @app.get("/api/cron/status")
 async def get_cron_status() -> JSONResponse:
-    """Return current cron job status for the UI."""
+    """Return current cron job status (from KV) for the UI."""
     settings = get_settings()
-    data = cron_status.to_dict()
-    data["next_run"] = get_next_run()
-    data["schedule"] = f"{settings.cron_hour:02d}:{settings.cron_minute:02d}"
-    data["timezone"] = settings.cron_timezone
-    return JSONResponse(data)
+    stored = storage.get_json(storage.KEY_LAST_STATUS) or {}
+
+    payload = {
+        "schedule": f"{settings.cron_hour:02d}:{settings.cron_minute:02d}",
+        "timezone": settings.cron_timezone,
+        "next_run": _next_run_iso(settings.cron_hour, settings.cron_minute),
+        "is_running": False,
+        "last_run": stored.get("last_run"),
+        "last_result": stored.get("last_result", ""),
+        "last_duration": stored.get("last_duration", 0.0),
+        "cards_count": stored.get("cards_count", 0),
+        "error": stored.get("error", ""),
+        "has_digest": stored.get("has_digest", False),
+    }
+    return JSONResponse(payload)
 
 
 @app.get("/api/cron/digest")
 async def get_cron_digest() -> JSONResponse:
-    """Return the last digest produced by the cron job."""
-    with cron_status._lock:
-        digest = cron_status.last_digest
-    if digest is None:
-        return JSONResponse({"digest": None})
+    """Return the last digest produced by the cron job (from KV)."""
+    digest = storage.get_json(storage.KEY_LAST_DIGEST)
     return JSONResponse({"digest": digest})
 
 
-async def _pipeline_stream() -> AsyncGenerator[dict, None]:
-    """Generator that runs pipeline steps and yields SSE events."""
-    t_start = time.time()
+@app.get("/api/cron")
+async def run_cron_job(request: Request) -> JSONResponse:
+    """Run the full pipeline as a Vercel Cron handler.
 
-    # Step 1: Scan Reddit
-    yield _event("step", "scan", "Сканирую Reddit...")
+    Protected by CRON_SECRET when set: Vercel sends Authorization: Bearer <secret>.
+    Returns a summary of the run.
+    """
+    _authorize_cron(request)
+
+    t0 = time.time()
+    logger.info("Cron job started")
+
     try:
-        raw_signals = await asyncio.to_thread(_run_scan)
-        yield _event("progress", "scan", f"Найдено {len(raw_signals)} сигналов")
-    except Exception as e:
-        yield _event("error", "scan", f"Ошибка сканирования: {e}")
-        return
+        digest = _run_pipeline()
+    except Exception as exc:
+        elapsed = time.time() - t0
+        logger.exception("Cron job failed after %.1fs", elapsed)
+        storage.set_json(
+            storage.KEY_LAST_STATUS,
+            {
+                "last_run": datetime.now(UTC).isoformat(),
+                "last_result": "error",
+                "last_duration": round(elapsed, 1),
+                "cards_count": 0,
+                "error": str(exc),
+                "has_digest": False,
+            },
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Step 2: Filter (Haiku)
-    yield _event("step", "filter", f"Фильтрую {len(raw_signals)} сигналов через AI...")
-    try:
-        filtered = await asyncio.to_thread(_run_filter, raw_signals)
-        yield _event("progress", "filter", f"Отобрано {len(filtered)} сигналов")
-    except Exception as e:
-        yield _event("error", "filter", f"Ошибка фильтрации: {e}")
-        return
-
-    # Step 3: Verify (Sonnet x2 per signal)
-    msg = f"Верифицирую {len(filtered)} сигналов (2 AI-вызова на каждый)..."
-    yield _event("step", "verify", msg)
-    try:
-        verified = await asyncio.to_thread(_run_verify, filtered)
-        yield _event("progress", "verify", f"Верифицировано {len(verified)} фактов")
-    except Exception as e:
-        yield _event("error", "verify", f"Ошибка верификации: {e}")
-        return
-
-    # Step 4: Generate digest (Opus)
-    yield _event("step", "generate", "Генерирую дайджест через Opus...")
-    try:
-        digest = await asyncio.to_thread(_run_generate, verified, len(raw_signals))
-        yield _event("progress", "generate", f"Создано {len(digest.cards)} карточек")
-    except Exception as e:
-        yield _event("error", "generate", f"Ошибка генерации: {e}")
-        return
-
-    elapsed = time.time() - t_start
+    elapsed = time.time() - t0
     digest_dict = _digest_to_dict(digest, elapsed)
 
-    with cron_status._lock:
-        cron_status.last_digest = digest_dict
+    storage.set_json(storage.KEY_LAST_DIGEST, digest_dict)
+    storage.set_json(
+        storage.KEY_LAST_STATUS,
+        {
+            "last_run": datetime.now(UTC).isoformat(),
+            "last_result": "success",
+            "last_duration": round(elapsed, 1),
+            "cards_count": len(digest.cards),
+            "error": "",
+            "has_digest": True,
+        },
+    )
 
-    # Send final result
-    yield _event(
-        "result",
-        "done",
-        json.dumps(digest_dict, ensure_ascii=False),
+    logger.info("Cron job completed in %.1fs, %d cards", elapsed, len(digest.cards))
+    return JSONResponse(
+        {
+            "ok": True,
+            "elapsed_seconds": round(elapsed, 1),
+            "cards_count": len(digest.cards),
+        }
     )
 
 
-def _run_scan() -> list:
-    """Run Reddit scanner."""
+def _authorize_cron(request: Request) -> None:
+    """Validate the CRON_SECRET if it is configured."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected:
+        return
+    auth = request.headers.get("authorization", "")
+    if auth != f"Bearer {expected}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _run_pipeline() -> DailyDigest:
+    """Execute the full scan -> filter -> verify -> generate -> send chain."""
+    from src.pipeline import filter_signals, generate_digest, verify_signals
     from src.scanner import scan_reddit
+    from src.telegram import send_digest
 
-    return scan_reddit()
+    raw_signals = scan_reddit()
+    filtered = filter_signals(raw_signals)
+    verified = verify_signals(filtered)
+    digest = generate_digest(verified)
+    digest.signals_scanned = len(raw_signals)
 
+    try:
+        send_digest(digest)
+    except Exception:
+        logger.exception("Telegram send failed (digest already saved to KV)")
 
-def _run_filter(signals: list) -> list:
-    """Run Haiku filtering."""
-    from src.pipeline import filter_signals
-
-    return filter_signals(signals)
-
-
-def _run_verify(signals: list) -> list:
-    """Run Sonnet verification."""
-    from src.pipeline import verify_signals
-
-    return verify_signals(signals)
-
-
-def _run_generate(facts: list, scanned: int) -> DailyDigest:
-    """Run Opus digest generation."""
-    from src.pipeline import generate_digest
-
-    digest = generate_digest(facts)
-    digest.signals_scanned = scanned
     return digest
 
 
-def _event(event_type: str, step: str, data: str) -> dict:
-    """Build an SSE event dict."""
-    payload = json.dumps({"step": step, "message": data}, ensure_ascii=False)
-    return {"event": event_type, "data": payload}
+def _next_run_iso(hour: int, minute: int) -> str:
+    """Compute the next UTC datetime matching (hour, minute) and return ISO string."""
+    now = datetime.now(UTC)
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate = candidate + timedelta(days=1)
+    return candidate.isoformat()
 
 
 def _digest_to_dict(digest: DailyDigest, elapsed: float) -> dict:
-    """Convert digest to a serializable dict for the frontend."""
+    """Convert a DailyDigest to a serializable dict for the frontend."""
     return {
         "date": digest.date.strftime("%d.%m.%Y"),
         "signals_scanned": digest.signals_scanned,

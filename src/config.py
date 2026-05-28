@@ -22,10 +22,13 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_channel_id: str = ""
 
-    # Scheduler - cron time (HH:MM Moscow time by default)
-    cron_hour: int = 9
+    # Cron schedule (display only; actual schedule lives in vercel.json, always UTC).
+    cron_hour: int = 6
     cron_minute: int = 0
-    cron_timezone: str = "Europe/Moscow"
+    cron_timezone: str = "UTC"
+
+    # Pipeline limits (Vercel Hobby has a 60s function ceiling)
+    max_signals_to_verify: int = 8
 
     # Scanner defaults
     subreddits: list[str] = [

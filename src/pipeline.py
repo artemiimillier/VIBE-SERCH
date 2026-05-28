@@ -226,9 +226,15 @@ def verify_signals(signals: list[RawSignal]) -> list[VerifiedFact]:
     if not signals:
         return []
 
+    from src.config import get_settings
+
+    cap = get_settings().max_signals_to_verify
+    if len(signals) > cap:
+        signals = sorted(signals, key=lambda s: s.score, reverse=True)[:cap]
+
     logger.info("=" * 60)
     logger.info(
-        "PHASE: VERIFY - %d signals, %d parallel workers, 2 AI calls each",
+        "PHASE: VERIFY - %d signals (capped), %d parallel workers, 2 AI calls each",
         len(signals), VERIFY_WORKERS,
     )
     logger.info("=" * 60)

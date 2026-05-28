@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/api/cron/status", "destination": "/api/index" },
+    { "source": "/api/cron/digest", "destination": "/api/index" },
+    { "source": "/api/cron", "destination": "/api/index" },
+    { "source": "/", "destination": "/api/index" }
+  ],
+  "crons": [
+    { "path": "/api/cron", "schedule": "0 6 * * *" }
+  ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  }
+}

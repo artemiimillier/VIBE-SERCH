@@ -498,11 +498,6 @@
   <div class="scene-hint">drag to rotate · click to poke</div>
 </div>
 
-<div class="controls">
-  <button class="run-btn" id="runBtn" onclick="startPipeline()">⚡ Запустить сканирование</button>
-</div>
-
-<div class="progress-area" id="progressArea"></div>
 <div class="results" id="resultsArea"></div>
 
 <!-- Import map for Three.js modules -->
@@ -1272,44 +1267,6 @@ setInterval(fetchCronStatus, 8000);
    INIT
    ================================================================ */
 initViewer();
-
-/* ================================================================
-   PIPELINE
-   ================================================================ */
-function startPipeline() {
-  const btn = document.getElementById('runBtn');
-  const progress = document.getElementById('progressArea');
-  const results = document.getElementById('resultsArea');
-  btn.disabled = true;
-  btn.textContent = 'Работаю...';
-  progress.innerHTML = '';
-  results.innerHTML = '';
-
-  const source = new EventSource('/api/run');
-  source.addEventListener('step', e => { addLog('step', JSON.parse(e.data).message); });
-  source.addEventListener('progress', e => { addLog('ok', JSON.parse(e.data).message); });
-  source.addEventListener('error', e => {
-    if (e.data) addLog('err', JSON.parse(e.data).message);
-    source.close(); btn.disabled = false; btn.textContent = '⚡ Запустить заново';
-  });
-  source.addEventListener('result', e => {
-    const d = JSON.parse(e.data);
-    renderResults(JSON.parse(d.message));
-    source.close(); btn.disabled = false; btn.textContent = '⚡ Запустить заново';
-  });
-  source.onerror = () => { source.close(); btn.disabled = false; btn.textContent = '⚡ Запустить заново'; };
-}
-
-function addLog(type, text) {
-  const area = document.getElementById('progressArea');
-  area.querySelectorAll('.pulsing').forEach(el => el.classList.remove('pulsing'));
-  const line = document.createElement('div');
-  line.className = 'log-line ' + type;
-  const icons = { step: '>', ok: '✓', err: '✗' };
-  const pc = type === 'step' ? ' pulsing' : '';
-  line.innerHTML = '<span class="icon' + pc + '">' + icons[type] + '</span><span>' + text + '</span>';
-  area.appendChild(line);
-}
 
 function renderResults(data) {
   const area = document.getElementById('resultsArea');
